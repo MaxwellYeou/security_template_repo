@@ -1,0 +1,62 @@
+on:
+  workflow_call:
+    inputs:
+      angular_version:
+        required: false
+        type: string
+      node_version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  zap-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ inputs.node_version || '20' }}
+
+      - name: Show Node.js version
+        run: node -v
+
+
+      - name: Install dependencies (conditional legacy-peer-deps)
+        run: |
+          NODE_MAJOR=$(node -v | grep -oP 'v\K[0-9]+')
+          echo "Detected Node.js major version: $NODE_MAJOR"
+          if [ "$NODE_MAJOR" -lt 20 ]; then
+            echo "Using npm install --legacy-peer-deps"
+            npm install --legacy-peer-deps
+          else
+            echo "Using standard npm install"
+            npm install
+          fi
+
+          
+      - name: Build Angular app
+        run: npm run build
+
+      - name: Serve Angular app (background)
+        run: |
+          npm install -g http-server
+          nohup http-server ./dist --port 4200 > server.log 2>&1 &
+          sleep 10
+
+      - name: Fix permissions for ZAP volume
+        run: |
+          sudo chmod -R a+w .
+
+      - name: Run ZAP Baseline Scan
+        uses: zaproxy/action-full-scan@v0.12.0
+        with:
+          target: "http://localhost:4200"
+          cmd_options: "-a"
+          allow_issue_writing: false

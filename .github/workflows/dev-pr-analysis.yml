@@ -1,0 +1,169 @@
+# Workflow pour la branche dev_test - analyses après merge
+name: Dev Test Branch Security Analysis
+
+on:
+  workflow_call:
+    inputs:
+      frameworks:
+        required: true
+        type: string
+      angular_version:
+        required: false
+        type: string
+      node_version:
+        required: false
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Analyse complète des dépendances
+  dependency-check:
+    name: 📦 Development Dependency Scan
+    uses: ./.github/workflows/dependency-check.yml
+
+  # Analyse SonarQube pour suivi de la qualité
+  sonar-analysis:
+    name: 🔍 Development Code Analysis
+    uses: ./.github/workflows/sonar-scan.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # Test de pénétration sur l'environnement de dev
+  zap-security-test:
+    name: 🛡️ Development Security Testing
+    if: contains(inputs.frameworks, 'Angular')
+    uses: ./.github/workflows/zap-scan.yml
+    with:
+      angular_version: ${{ inputs.angular_version }}
+      node_version: ${{ inputs.node_version }}
+
+  # Analyse des tendances de sécurité
+  security-trend-analysis:
+    name: 📈 Security Trend Analysis
+    runs-on: ubuntu-latest
+    needs: [dependency-check, sonar-analysis]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Récupérer l'historique pour l'analyse des tendances
+
+      - name: Analyze security trends
+        run: |
+          echo "📈 Analyzing security trends for dev_test branch..."
+          
+          # Ici, vous pouvez ajouter une logique pour comparer avec les scans précédents
+          # Par exemple, stocker les métriques dans un fichier ou une base de données
+          
+          echo "📊 Development branch security metrics:"
+          echo "- Last scan: $(date)"
+          echo "- Branch: dev_test"
+          echo "- Commit: ${{ github.sha }}"
+          
+          # Créer un fichier de métriques pour le suivi
+          mkdir -p .security-metrics
+          cat > .security-metrics/dev-scan-$(date +%Y%m%d).json << EOF
+          {
+            "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "branch": "dev_test",
+            "commit": "${{ github.sha }}",
+            "dependency_check": "${{ needs.dependency-check.result }}",
+            "sonar_analysis": "${{ needs.sonar-analysis.result }}",
+            "scan_type": "development"
+          }
+          EOF
+
+  # Notification des équipes de développement
+  dev-team-notification:
+    name: 📧 Development Team Notification
+    runs-on: ubuntu-latest
+    needs: [dependency-check, sonar-analysis, zap-security-test, security-trend-analysis]
+    if: always()
+    steps:
+      - name: Prepare notification summary
+        run: |
+          echo "📧 Preparing development team notification..."
+          
+          # Compter les résultats
+          success_count=0
+          failure_count=0
+          
+          results=("${{ needs.dependency-check.result }}" "${{ needs.sonar-analysis.result }}" "${{ needs.zap-security-test.result }}")
+          
+          for result in "${results[@]}"; do
+            if [[ "$result" == "success" ]]; then
+              ((success_count++))
+            elif [[ "$result" == "failure" ]]; then
+              ((failure_count++))
+            fi
+          done
+          
+          echo "✅ Successful checks: $success_count"
+          echo "❌ Failed checks: $failure_count"
+          
+          # Déterminer l'action nécessaire
+          if [ $failure_count -gt 0 ]; then
+            echo "⚠️ Action required: Some security checks failed"
+            echo "action_required=true" >> $GITHUB_ENV
+          else
+            echo "✅ All checks passed - no action required"
+            echo "action_required=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create development summary issue
+        if: env.action_required == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🧪 Dev Branch Security Alert - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## 🧪 Development Branch Security Analysis Alert
+            
+            ### 📋 Scan Summary
+            - **Branch**: dev_test
+            - **Commit**: ${{ github.sha }}
+            - **Date**: ${new Date().toISOString()}
+            - **Triggered by**: @${{ github.actor }}
+            
+            ### 📊 Results Overview
+            | Check | Status |
+            |-------|--------|
+            | 📦 Dependency Check | ${{ needs.dependency-check.result }} |
+            | 🔍 SonarQube Analysis | ${{ needs.sonar-analysis.result }} |
+            | 🛡️ ZAP Security Test | ${{ needs.zap-security-test.result || 'skipped' }} |
+            
+            ### 🎯 Development Team Actions
+            
+            #### Immediate (This Sprint)
+            - [ ] Review failed security checks
+            - [ ] Address high-priority vulnerabilities
+            - [ ] Update team on security status
+            
+            #### Next Sprint Planning
+            - [ ] Include security debt in sprint planning
+            - [ ] Schedule security training if needed
+            - [ ] Review security practices
+            
+            ### 🔗 Resources
+            - [Detailed Reports](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - [Security Guidelines](https://github.com/${{ github.repository }}/wiki/Security)
+            - Development Team: @dev-team
+            
+            ---
+            *Automated development security monitoring*`;
+            
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['security', 'development', 'dev-team', 'automated']
+            });

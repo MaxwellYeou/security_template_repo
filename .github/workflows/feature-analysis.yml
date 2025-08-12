@@ -1,0 +1,58 @@
+# Workflow pour les branches de feature - analyses légères
+name: Feature Branch Security Analysis
+
+on:
+  workflow_call:
+    inputs:
+      frameworks:
+        required: true
+        type: string
+      angular_version:
+        required: false
+        type: string
+      node_version:
+        required: false
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Analyse des dépendances (rapide)
+  dependency-check:
+    name: 📦 Dependency Analysis
+    uses: ./.github/workflows/dependency-check.yml
+
+  # Analyse SonarQube (qualité du code)
+  sonar-analysis:
+    name: 🔍 Code Quality Analysis  
+    uses: ./.github/workflows/sonar-scan.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # Notification rapide en cas de problème
+  feature-summary:
+    name: 📋 Feature Analysis Summary
+    runs-on: ubuntu-latest
+    needs: [dependency-check, sonar-analysis]
+    if: always()
+    steps:
+      - name: Analysis Summary
+        run: |
+          echo "🔧 Feature Branch Analysis Complete"
+          echo "📦 Dependency Check: ${{ needs.dependency-check.result }}"
+          echo "🔍 SonarQube Analysis: ${{ needs.sonar-analysis.result }}"
+          
+          if [[ "${{ needs.dependency-check.result }}" == "failure" || "${{ needs.sonar-analysis.result }}" == "failure" ]]; then
+            echo "⚠️ Some analyses failed - check logs for details"
+            exit 1
+          else
+            echo "✅ All analyses passed successfully"
+          fi

@@ -1,0 +1,378 @@
+name: CI/CD Security Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      force_full_scan:
+        required: false
+        type: boolean
+        default: false
+      cvss_threshold:
+        required: false
+        type: string
+        default: "7.0"
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+      NVD_API_KEY:
+        required: false
+
+jobs:
+  # Job de détection pour optimiser les analyses 
+  detect-context:
+    name: 🔍 Detect Project Context
+    runs-on: ubuntu-latest
+    outputs:
+      languages: ${{ steps.detect-langs.outputs.languages }}
+      frameworks: ${{ steps.detect-frameworks.outputs.frameworks }}
+      angular_version: ${{ steps.detect-angular-version.outputs.angular_version }}
+      node_version: ${{ steps.determine-node.outputs.node_version }}
+      branch_type: ${{ steps.branch-context.outputs.branch_type }}
+      is_feature_branch: ${{ steps.branch-context.outputs.is_feature_branch }}
+      is_dev_test: ${{ steps.branch-context.outputs.is_dev_test }}
+      is_main: ${{ steps.branch-context.outputs.is_main }}
+      is_pr_to_dev: ${{ steps.branch-context.outputs.is_pr_to_dev }}
+      is_pr_to_main: ${{ steps.branch-context.outputs.is_pr_to_main }}
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Analyze branch context
+        id: branch-context
+        run: |
+          echo "Current branch: ${{ github.ref_name }}"
+          echo "Event: ${{ github.event_name }}"
+          echo "Target branch: ${{ github.base_ref }}"
+          
+          # Déterminer le type de branche et les actions
+          is_feature_branch=false
+          is_dev_test=false
+          is_main=false
+          is_pr_to_dev=false
+          is_pr_to_main=false
+          branch_type="unknown"
+          
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if [[ "${{ github.base_ref }}" == "dev_test" ]]; then
+              is_pr_to_dev=true
+              branch_type="pr_to_dev"
+            elif [[ "${{ github.base_ref }}" == "main" ]]; then
+              is_pr_to_main=true
+              branch_type="pr_to_main"
+            fi
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            is_main=true
+            branch_type="main"
+          elif [[ "${{ github.ref_name }}" == "dev_test" ]]; then
+            is_dev_test=true
+            branch_type="dev_test"
+          else
+            is_feature_branch=true
+            branch_type="feature"
+          fi
+          
+          echo "branch_type=$branch_type" >> $GITHUB_OUTPUT
+          echo "is_feature_branch=$is_feature_branch" >> $GITHUB_OUTPUT
+          echo "is_dev_test=$is_dev_test" >> $GITHUB_OUTPUT
+          echo "is_main=$is_main" >> $GITHUB_OUTPUT
+          echo "is_pr_to_dev=$is_pr_to_dev" >> $GITHUB_OUTPUT
+          echo "is_pr_to_main=$is_pr_to_main" >> $GITHUB_OUTPUT
+
+      - name: Detect languages
+        id: detect-langs
+        run: |
+          langs=$(gh api repos/${{ github.repository }}/languages --jq 'keys | join(",")')
+          echo "languages=$langs" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect frameworks
+        id: detect-frameworks
+        run: |
+          frameworks=""
+          if [ -f package.json ]; then
+            if grep -q '"@angular/core"' package.json; then
+              frameworks+="Angular,"
+            fi
+            if grep -q '"react"' package.json; then
+              frameworks+="React,"
+            fi
+            if grep -q '"express"' package.json; then
+              frameworks+="Express,"
+            fi
+            if grep -q '"next"' package.json; then
+              frameworks+="Next,"
+            fi
+          fi
+          if [ -f requirements.txt ]; then
+            if grep -qi 'django' requirements.txt; then
+              frameworks+="Django,"
+            fi
+            if grep -qi 'flask' requirements.txt; then
+              frameworks+="Flask,"
+            fi
+          fi
+          echo "frameworks=$frameworks" >> $GITHUB_OUTPUT
+
+      - name: Detect Angular version
+        id: detect-angular-version
+        run: |
+          version=""
+          if [ -f package.json ]; then
+            version=$(jq -r '.dependencies["@angular/core"] // empty' package.json | sed 's/[^0-9.]//g' | cut -d '.' -f1)
+          fi
+          echo "angular_version=$version" >> $GITHUB_OUTPUT
+          
+      - name: Determine Node.js version from Angular version
+        id: determine-node
+        run: |
+          angular_version="${{ steps.detect-angular-version.outputs.angular_version }}"
+          node_version="20"  # valeur par défaut
+          
+          if [ "$angular_version" = "17" ]; then
+            node_version="20"
+          elif [ "$angular_version" = "16" ]; then
+            node_version="18"
+          elif [ "$angular_version" = "15" ]; then
+            node_version="16"
+          elif [ "$angular_version" = "13" ]; then
+            node_version="12"
+          fi
+          echo "node_version=$node_version" >> $GITHUB_OUTPUT
+
+  # =================== FEATURE BRANCHES ===================
+  # Analyses légères sur les branches de feature (push direct)
+  feature-branch-checks:
+    name: 🔧 Feature Branch Analysis
+    needs: detect-context
+    if: needs.detect-context.outputs.is_feature_branch == 'true' && github.event_name == 'push'
+    uses: ./.github/workflows/feature-analysis.yml
+    with:
+      frameworks: ${{ needs.detect-context.outputs.frameworks }}
+      angular_version: ${{ needs.detect-context.outputs.angular_version }}
+      node_version: ${{ needs.detect-context.outputs.node_version }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # =================== PULL REQUEST TO DEV_TEST ===================
+  # Analyses complètes incluant ZAP pour les PR vers dev_test
+  pr-to-dev-checks:
+    name: 🧪 Dev Test PR Analysis
+    needs: detect-context
+    if: needs.detect-context.outputs.is_pr_to_dev == 'true'
+    uses: ./.github/workflows/dev-pr-analysis.yml
+    with:
+      frameworks: ${{ needs.detect-context.outputs.frameworks }}
+      angular_version: ${{ needs.detect-context.outputs.angular_version }}
+      node_version: ${{ needs.detect-context.outputs.node_version }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # =================== PULL REQUEST TO MAIN ===================
+  # Analyses de production pour les PR vers main
+  pr-to-main-checks:
+    name: 🚀 Production PR Analysis
+    needs: detect-context
+    if: needs.detect-context.outputs.is_pr_to_main == 'true'
+    uses: ./.github/workflows/prod-pr-analysis.yml
+    with:
+      frameworks: ${{ needs.detect-context.outputs.frameworks }}
+      angular_version: ${{ needs.detect-context.outputs.angular_version }}
+      node_version: ${{ needs.detect-context.outputs.node_version }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # =================== DEV_TEST BRANCH ===================
+  # Analyses lors des push sur dev_test
+  dev-test-checks:
+    name: 🧪 Dev Test Branch Analysis
+    needs: detect-context
+    if: needs.detect-context.outputs.is_dev_test == 'true' && github.event_name == 'push'
+    uses: ./.github/workflows/dev-analysis.yml
+    with:
+      frameworks: ${{ needs.detect-context.outputs.frameworks }}
+      angular_version: ${{ needs.detect-context.outputs.angular_version }}
+      node_version: ${{ needs.detect-context.outputs.node_version }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # =================== MAIN BRANCH ===================
+  # Analyses de production lors des push sur main
+  main-branch-checks:
+    name: 🚀 Production Analysis
+    needs: detect-context
+    if: needs.detect-context.outputs.is_main == 'true' && github.event_name == 'push'
+    uses: ./.github/workflows/prod-analysis.yml
+    with:
+      frameworks: ${{ needs.detect-context.outputs.frameworks }}
+      angular_version: ${{ needs.detect-context.outputs.angular_version }}
+      node_version: ${{ needs.detect-context.outputs.node_version }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # =================== SECURITY ISSUE CREATION ===================
+  # Création d'issues en cas de vulnérabilités critiques
+  create-security-issues:
+    name: 🛑 Security Issue Management
+    runs-on: ubuntu-latest
+    needs: [detect-context, feature-branch-checks, pr-to-dev-checks, pr-to-main-checks, dev-test-checks, main-branch-checks]
+    if: always() && (needs.feature-branch-checks.result == 'success' || needs.pr-to-dev-checks.result == 'success' || needs.pr-to-main-checks.result == 'success' || needs.dev-test-checks.result == 'success' || needs.main-branch-checks.result == 'success')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Download security reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-report"
+          merge-multiple: true
+          path: reports
+        continue-on-error: true
+        
+      - name: Check for critical findings
+        id: check-findings
+        run: |
+          critical=false
+          findings_summary=""
+          
+          if [ -d "reports" ]; then
+            echo "🔍 Analysing security reports..."
+            
+            # Compter les vulnérabilités par type
+            critical_count=0
+            high_count=0
+            medium_count=0
+            
+            if find reports -type f \( -name "*.xml" -o -name "*.json" -o -name "*.html" -o -name "*.txt" \) -exec grep -l -i "critical" {} \; > /dev/null 2>&1; then
+              critical_count=$(find reports -type f -exec grep -i "critical" {} \; | wc -l)
+              critical=true
+            fi
+            
+            if find reports -type f \( -name "*.xml" -o -name "*.json" -o -name "*.html" -o -name "*.txt" \) -exec grep -l -i "high" {} \; > /dev/null 2>&1; then
+              high_count=$(find reports -type f -exec grep -i "high" {} \; | wc -l)
+            fi
+            
+            if find reports -type f \( -name "*.xml" -o -name "*.json" -o -name "*.html" -o -name "*.txt" \) -exec grep -l -i "medium" {} \; > /dev/null 2>&1; then
+              medium_count=$(find reports -type f -exec grep -i "medium" {} \; | wc -l)
+            fi
+            
+            findings_summary="Critical: $critical_count, High: $high_count, Medium: $medium_count"
+            echo "📊 Findings: $findings_summary"
+          else
+            echo "⚠️ No security reports found"
+          fi
+          
+          echo "critical=$critical" >> $GITHUB_OUTPUT
+          echo "findings_summary=$findings_summary" >> $GITHUB_OUTPUT
+
+      - name: Create enhanced security issue
+        if: steps.check-findings.outputs.critical == 'true'
+        run: |
+          CURRENT_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          WORKFLOW_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BRANCH_TYPE="${{ needs.detect-context.outputs.branch_type }}"
+          
+          # Déterminer le niveau de priorité selon la branche
+          if [[ "$BRANCH_TYPE" == "main" || "$BRANCH_TYPE" == "pr_to_main" ]]; then
+            PRIORITY="🔴 CRITICAL - Production"
+            LABELS="security,critical,production,automated"
+          elif [[ "$BRANCH_TYPE" == "dev_test" || "$BRANCH_TYPE" == "pr_to_dev" ]]; then
+            PRIORITY="🟠 HIGH - Development"
+            LABELS="security,high,development,automated"
+          else
+            PRIORITY="🟡 MEDIUM - Feature"
+            LABELS="security,medium,feature,automated"
+          fi
+          
+          cat > security-issue.md << EOF
+          # 🚨 Vulnérabilités de sécurité détectées - $PRIORITY
+          
+          ## 📋 Contexte du scan
+          | Champ | Valeur |
+          |-------|--------|
+          | **Priorité** | $PRIORITY |
+          | **Branche** | \`${{ github.ref_name }}\` (\`$BRANCH_TYPE\`) |
+          | **Commit** | [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |
+          | **Workflow** | [\`${{ github.workflow }}\`]($WORKFLOW_URL) |
+          | **Déclencheur** | ${{ github.event_name }} par @${{ github.actor }} |
+          | **Date** | \`$CURRENT_DATE\` |
+          
+          ## 📊 Résumé des vulnérabilités
+          \`\`\`
+          ${{ steps.check-findings.outputs.findings_summary }}
+          \`\`\`
+          
+          ## 📁 Rapports détaillés
+          
+          > **🔗 [Accéder aux artefacts du workflow]($WORKFLOW_URL#artifacts)**
+          
+          Les rapports complets sont disponibles dans les artefacts :
+          - **Dependency Check** : Rapport HTML avec détails des vulnérabilités
+          - **SonarQube** : Analyse de qualité et sécurité du code  
+          - **ZAP Scan** : Test de pénétration automatisé (si applicable)
+          
+          ## ⚡ Plan d'action par priorité
+          
+          ### 🚨 Actions immédiates
+          - [ ] **Examiner les vulnérabilités CRITICAL** dans les rapports
+          - [ ] **Identifier les dépendances** à risque élevé
+          - [ ] **Evaluer l'impact** sur la sécurité
+          
+          ### 🔧 Corrections 
+          - [ ] **Mettre à jour les dépendances vulnérables**
+          - [ ] **Appliquer les correctifs de sécurité**
+          - [ ] **Tester les corrections** localement
+          
+          ### ✅ Validation
+          - [ ] **Relancer les scans** de sécurité
+          - [ ] **Valider la résolution** des vulnérabilités
+          - [ ] **Déployer les corrections** selon le processus
+          
+          ## 🛠️ Commandes utiles
+          
+          \`\`\`bash
+          # Audit des dépendances Node.js
+          npm audit
+          npm audit fix
+          
+          # Mise à jour des dépendances Python
+          pip install --upgrade -r requirements.txt
+          pip-audit
+          
+          # Scan local avec les mêmes outils
+          docker run --rm -v "\$(pwd)":/src owasp/dependency-check --scan /src
+          \`\`\`
+          
+          ## 📞 Support
+          
+          - **Équipe sécurité** : @AlainAvenel, @MaxwellYeou
+          - **Urgence** : Contacter le sécurity analyst
+          
+          ---
+          
+          > 🤖 Issue créée automatiquement le \`$CURRENT_DATE\` par le pipeline CI/CD
+          > 
+          > **Contexte** : $BRANCH_TYPE | **Run ID** : ${{ github.run_id }}
+          EOF
+
+      - name: Create GitHub issue
+        if: steps.check-findings.outputs.critical == 'true'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "🚨 Vulnérabilités ${{ needs.detect-context.outputs.branch_type }} - ${{ github.sha }}"
+          content-filepath: ./security-issue.md
+          labels: |
+            security
+            critical  
+            automated
+            ${{ needs.detect-context.outputs.branch_type }}
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,24 @@
+on:
+  workflow_call:
+    secrets:
+      SONAR_TOKEN:
+        required: true 
+      SONAR_HOST_URL:
+        required: true
+
+
+jobs:
+  build:
+    name: Build and analyze
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Requis pour que l’analyse soit complète
+
+      - name: Analyse SonarQube
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}

@@ -1,0 +1,104 @@
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  security-scan:
+    name: 📦 Dependency Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        continue-on-error: true
+        with:
+          project: ${{ github.event.repository.name }}
+          path: "."
+          format: "ALL"  # Génère HTML, XML, JSON
+          out: "reports"
+          args: >
+            --enableRetired
+            --enableExperimental
+            --failOnCVSS 7
+            
+
+      - name: Generate enhanced report summary
+        run: |
+          if [ -d "reports" ]; then
+            echo "📊 Dependency Check Summary" > dependency-summary.md
+            echo "=========================" >> dependency-summary.md
+            echo "" >> dependency-summary.md
+            
+            # Compter les vulnérabilités par sévérité
+            if [ -f "reports/dependency-check-report.xml" ]; then
+              critical=$(grep -o 'severity="CRITICAL"' reports/dependency-check-report.xml | wc -l)
+              high=$(grep -o 'severity="HIGH"' reports/dependency-check-report.xml | wc -l)
+              medium=$(grep -o 'severity="MEDIUM"' reports/dependency-check-report.xml | wc -l)
+              low=$(grep -o 'severity="LOW"' reports/dependency-check-report.xml | wc -l)
+              
+              echo "🔴 Critical: $critical" >> dependency-summary.md
+              echo "🟠 High: $high" >> dependency-summary.md
+              echo "🟡 Medium: $medium" >> dependency-summary.md
+              echo "🟢 Low: $low" >> dependency-summary.md
+              echo "" >> dependency-summary.md
+              
+              total=$((critical + high + medium + low))
+              echo "📈 Total vulnerabilities: $total" >> dependency-summary.md
+              
+              # Statut global
+              if [ $critical -gt 0 ]; then
+                echo "❌ Status: CRITICAL - Immediate action required" >> dependency-summary.md
+              elif [ $high -gt 0 ]; then
+                echo "⚠️ Status: HIGH - Action required" >> dependency-summary.md
+              elif [ $medium -gt 0 ]; then
+                echo "🟡 Status: MEDIUM - Review recommended" >> dependency-summary.md
+              else
+                echo "✅ Status: CLEAN - No significant vulnerabilities" >> dependency-summary.md
+              fi
+            fi
+            
+            echo "" >> dependency-summary.md
+            echo "📅 Scan completed: $(date)" >> dependency-summary.md
+            
+            # Ajouter le résumé au rapport principal
+            cat dependency-summary.md
+          fi
+
+      - name: Upload Dependency-Check Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: |
+            reports/
+            dependency-summary.md
+          retention-days: 30
+
+      - name: Comment PR with summary (if PR)
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const summary = fs.readFileSync('dependency-summary.md', 'utf8');
+              const comment = `## 📦 Dependency Security Scan Results
+              
+              \`\`\`
+              ${summary}
+              \`\`\`
+              
+              📁 [Download detailed reports](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)`;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            } catch (error) {
+              console.log('Summary file not found, skipping PR comment');
+            }

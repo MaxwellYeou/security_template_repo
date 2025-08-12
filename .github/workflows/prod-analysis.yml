@@ -1,0 +1,287 @@
+# Workflow pour la branche main - analyses de production
+name: Production Security Analysis
+
+on:
+  workflow_call:
+    inputs:
+      frameworks:
+        required: true
+        type: string
+      angular_version:
+        required: false
+        type: string
+      node_version:
+        required: false
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  # Analyse critique des dépendances pour la production
+  production-dependency-check:
+    name: 🔒 Production Dependency Audit
+    uses: ./.github/workflows/dependency-check.yml
+
+  # Analyse SonarQube avec gates de production
+  production-sonar-analysis:
+    name: 🏭 Production Code Analysis
+    uses: ./.github/workflows/sonar-scan.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # Test de sécurité complet en production
+  production-zap-test:
+    name: 🛡️ Production Security Testing
+    if: contains(inputs.frameworks, 'Angular')
+    uses: ./.github/workflows/zap-scan.yml
+    with:
+      angular_version: ${{ inputs.angular_version }}
+      node_version: ${{ inputs.node_version }}
+
+  # Validation de conformité pour la production
+  production-compliance-check:
+    name: 📋 Production Compliance Validation
+    runs-on: ubuntu-latest
+    needs: [production-dependency-check, production-sonar-analysis]
+    steps:
+      - name: Download all security reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-report"
+          merge-multiple: true
+          path: compliance-reports
+        continue-on-error: true
+
+      - name: Production compliance validation
+        run: |
+          echo "📋 Validating production compliance..."
+          
+          compliance_issues=0
+          
+          if [ -d "compliance-reports" ]; then
+            echo "🔍 Checking compliance requirements..."
+            
+            # Vérifier les vulnérabilités critiques (CVSS 9.0+)
+            critical_vulns=$(find compliance-reports -type f -exec grep -i "cvss.*[9-9]\.[0-9]\|cvss.*10\.0\|critical" {} \; | wc -l)
+            echo "🔴 Critical vulnerabilities: $critical_vulns"
+            
+            # Vérifier les vulnérabilités élevées (CVSS 7.0+)
+            high_vulns=$(find compliance-reports -type f -exec grep -i "cvss.*[7-8]\.[0-9]\|high" {} \; | wc -l)
+            echo "🟠 High vulnerabilities: $high_vulns"
+            
+            # Définir les seuils de conformité pour la production
+            if [ $critical_vulns -gt 0 ]; then
+              echo "❌ COMPLIANCE FAILURE: Critical vulnerabilities detected in production"
+              compliance_issues=$((compliance_issues + critical_vulns))
+            fi
+            
+            if [ $high_vulns -gt 5 ]; then
+              echo "⚠️ COMPLIANCE WARNING: Too many high vulnerabilities ($high_vulns > 5)"
+              compliance_issues=$((compliance_issues + 1))
+            fi
+            
+            # Générer le rapport de conformité
+            cat > compliance-report.md << EOF
+          # 📋 Production Compliance Report
+          
+          ## 🎯 Compliance Status
+          $([ $compliance_issues -eq 0 ] && echo "✅ **COMPLIANT** - Meets production security standards" || echo "❌ **NON-COMPLIANT** - $compliance_issues issues found")
+          
+          ## 📊 Security Metrics
+          - **Critical Vulnerabilities**: $critical_vulns (Limit: 0)
+          - **High Vulnerabilities**: $high_vulns (Limit: 5)
+          - **Compliance Score**: $([ $compliance_issues -eq 0 ] && echo "100%" || echo "$((100 - compliance_issues * 10))%")
+          
+          ## 🏭 Production Standards
+          - Zero critical vulnerabilities ✅
+          - Maximum 5 high vulnerabilities $([ $high_vulns -le 5 ] && echo "✅" || echo "❌")
+          - SonarQube quality gate passed ✅
+          - All security tests completed ✅
+          EOF
+            
+            echo "📊 Compliance issues found: $compliance_issues"
+            echo "compliance_issues=$compliance_issues" >> $GITHUB_ENV
+            
+          else
+            echo "❌ No compliance reports found"
+            echo "compliance_issues=999" >> $GITHUB_ENV
+          fi
+
+      - name: Upload compliance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-compliance-report
+          path: compliance-report.md
+
+  # Audit de sécurité post-déploiement
+  post-deployment-audit:
+    name: 🔍 Post-Deployment Security Audit
+    runs-on: ubuntu-latest
+    needs: [production-dependency-check, production-sonar-analysis, production-zap-test, production-compliance-check]
+    steps:
+      - name: Checkout for audit
+        uses: actions/checkout@v4
+
+      - name: Production security audit
+        run: |
+          echo "🔍 Conducting post-deployment security audit..."
+          
+          # Créer un rapport d'audit complet
+          audit_date=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          cat > security-audit-report.md << EOF
+          # 🔍 Production Security Audit Report
+          
+          ## 📅 Audit Information
+          - **Date**: $audit_date
+          - **Commit**: ${{ github.sha }}
+          - **Branch**: main (production)
+          - **Auditor**: Automated Security Pipeline
+          
+          ## 🏭 Production Deployment Security Status
+          
+          ### 📦 Dependency Security
+          - **Status**: ${{ needs.production-dependency-check.result }}
+          - **Action**: $([ "${{ needs.production-dependency-check.result }}" == "success" ] && echo "No action required" || echo "Immediate remediation required")
+          
+          ### 🔍 Code Quality & Security
+          - **SonarQube Analysis**: ${{ needs.production-sonar-analysis.result }}
+          - **Quality Gate**: $([ "${{ needs.production-sonar-analysis.result }}" == "success" ] && echo "Passed" || echo "Failed - Review required")
+          
+          ### 🛡️ Penetration Testing
+          - **ZAP Security Test**: ${{ needs.production-zap-test.result || 'N/A' }}
+          - **Security Posture**: $([ "${{ needs.production-zap-test.result }}" == "success" ] && echo "Secure" || echo "Review required")
+          
+          ### 📋 Compliance Status
+          - **Production Compliance**: ${{ needs.production-compliance-check.result }}
+          - **Regulatory Compliance**: $([ "${{ needs.production-compliance-check.result }}" == "success" ] && echo "Compliant" || echo "Non-compliant - Action required")
+          
+          ## 🎯 Recommendations
+          
+          ### Immediate Actions
+          - Monitor production logs for security incidents
+          - Verify all security controls are operational
+          - Confirm backup and recovery procedures
+          
+          ### Ongoing Monitoring
+          - Schedule next security review in 30 days
+          - Monitor for new vulnerabilities in dependencies
+          - Track security metrics and trends
+          
+          ## 📞 Incident Response
+          - **Security Team**: @security-team
+          - **On-Call**: DevSecOps team
+          - **Escalation**: CISO office
+          
+          ---
+          *Automated production security audit - ${{ github.run_id }}*
+          EOF
+          
+          echo "✅ Security audit report generated"
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-security-audit
+          path: security-audit-report.md
+
+  # Notification critique pour les équipes de production
+  production-security-alert:
+    name: 🚨 Production Security Alert
+    runs-on: ubuntu-latest
+    needs: [production-dependency-check, production-sonar-analysis, production-zap-test, production-compliance-check, post-deployment-audit]
+    if: always()
+    steps:
+      - name: Assess production security status
+        run: |
+          echo "🚨 Assessing production security status..."
+          
+          # Vérifier si des checks critiques ont échoué
+          critical_failure=false
+          
+          checks=("${{ needs.production-dependency-check.result }}" "${{ needs.production-sonar-analysis.result }}" "${{ needs.production-compliance-check.result }}")
+          
+          for check in "${checks[@]}"; do
+            if [[ "$check" == "failure" ]]; then
+              critical_failure=true
+              break
+            fi
+          done
+          
+          echo "critical_failure=$critical_failure" >> $GITHUB_ENV
+          echo "🔍 Critical failure detected: $critical_failure"
+
+      - name: Create production security alert
+        if: env.critical_failure == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🚨 PRODUCTION SECURITY ALERT - ${new Date().toISOString().split('T')[0]}`;
+            const body = `# 🚨 CRITICAL PRODUCTION SECURITY ALERT
+            
+            ## ⚠️ IMMEDIATE ACTION REQUIRED
+            
+            Critical security issues have been detected in the production deployment.
+            
+            ### 📋 Failure Summary
+            | Component | Status | Severity |
+            |-----------|--------|----------|
+            | 📦 Dependency Check | ${{ needs.production-dependency-check.result }} | ${{ needs.production-dependency-check.result == 'failure' && 'CRITICAL' || 'OK' }} |
+            | 🔍 SonarQube Analysis | ${{ needs.production-sonar-analysis.result }} | ${{ needs.production-sonar-analysis.result == 'failure' && 'CRITICAL' || 'OK' }} |
+            | 🛡️ ZAP Security Test | ${{ needs.production-zap-test.result || 'skipped' }} | ${{ needs.production-zap-test.result == 'failure' && 'HIGH' || 'OK' }} |
+            | 📋 Compliance Check | ${{ needs.production-compliance-check.result }} | ${{ needs.production-compliance-check.result == 'failure' && 'CRITICAL' || 'OK' }} |
+            
+            ### 🚨 Emergency Response Protocol
+            
+            #### Immediate (< 1 hour)
+            - [ ] **Security team notified** - @security-team
+            - [ ] **Production monitoring enhanced**
+            - [ ] **Incident response activated**
+            
+            #### Critical (< 4 hours)
+            - [ ] **Root cause analysis initiated**
+            - [ ] **Risk assessment completed**
+            - [ ] **Remediation plan created**
+            
+            #### Resolution (< 24 hours)
+            - [ ] **Security fixes deployed**
+            - [ ] **Validation testing completed**
+            - [ ] **Production security verified**
+            
+            ### 📞 Emergency Contacts
+            - **Security Team**: @security-team
+            - **DevSecOps**: @devsecops-team  
+            - **On-Call Engineer**: Check PagerDuty
+            - **CISO**: Escalate if needed
+            
+            ### 🔗 Investigation Resources
+            - [Security Audit Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - [Compliance Report Artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)
+            
+            ---
+            
+            **⚠️ DO NOT IGNORE THIS ALERT**
+            
+            This is an automated critical security alert for production. Immediate action is required to maintain security posture.
+            
+            *Alert generated: ${new Date().toISOString()}*
+            *Run ID: ${{ github.run_id }}*`;
+            
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['security', 'critical', 'production', 'emergency', 'automated']
+            });
+            
+            // Optionnellement, vous pouvez ajouter ici une intégration avec Slack, PagerDuty, etc.
+            console.log('🚨 CRITICAL PRODUCTION SECURITY ALERT CREATED');

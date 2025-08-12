@@ -1,0 +1,40 @@
+name: Custom Security Pipeline
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: 
+      - dev_test
+      - main
+    types: [opened, synchronize, reopened]
+  # Déclenchement manuel avec options
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of security scan'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+        - standard
+        - full
+        - compliance-only
+      target_branch:
+        description: 'Target branch for analysis'
+        required: false
+        type: string
+
+jobs:
+  custom-security:
+    name: 🔧 Custom Security Analysis
+    uses: Tower-IS/global-workflows/.github/workflows/security-checks.yml@main
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    with:
+      # Configuration dynamique selon l'input
+      force_full_scan: ${{ github.event.inputs.scan_type == 'full' || github.event.inputs.scan_type == 'compliance-only' }}
+      cvss_threshold: ${{ github.event.inputs.scan_type == 'compliance-only' && '5.0' || '7.0' }}
+      skip_zap_scan: ${{ github.event.inputs.scan_type == 'compliance-only' }}

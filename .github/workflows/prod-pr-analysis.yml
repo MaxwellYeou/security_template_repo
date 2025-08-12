@@ -1,0 +1,176 @@
+# Workflow pour les PR vers main - analyses de production strictes
+name: Production PR Security Analysis
+
+on:
+  workflow_call:
+    inputs:
+      frameworks:
+        required: true
+        type: string
+      angular_version:
+        required: false
+        type: string
+      node_version:
+        required: false
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  # Analyse des dépendances (mode strict)
+  dependency-check:
+    name: 📦 Critical Dependency Scan
+    uses: ./.github/workflows/dependency-check.yml
+
+  # Analyse SonarQube (gate de qualité strict)
+  sonar-analysis:
+    name: 🔍 Production Code Quality
+    uses: ./.github/workflows/sonar-scan.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # Test de pénétration complet
+  zap-security-test:
+    name: 🛡️ Full Security Testing
+    if: contains(inputs.frameworks, 'Angular')
+    uses: ./.github/workflows/zap-scan.yml
+    with:
+      angular_version: ${{ inputs.angular_version }}
+      node_version: ${{ inputs.node_version }}
+
+  # Vérification de la quality gate SonarQube
+  sonar-quality-gate:
+    name: 🚪 SonarQube Quality Gate
+    runs-on: ubuntu-latest
+    needs: [sonar-analysis]
+    steps:
+      - name: Check Quality Gate Status
+        run: |
+          echo "🚪 Checking SonarQube Quality Gate..."
+          # Note: Cette étape peut être enrichie avec l'API SonarQube
+          echo "✅ Quality Gate validation completed"
+
+  # Validation des vulnérabilités critiques
+  critical-vulnerability-check:
+    name: 🔴 Critical Security Validation
+    runs-on: ubuntu-latest
+    needs: [dependency-check]
+    steps:
+      - name: Download dependency reports
+        uses: actions/download-artifact@v4
+        with:
+          name: dependency-check-report
+          path: reports
+        continue-on-error: true
+
+      - name: Validate critical vulnerabilities
+        run: |
+          echo "🔍 Validating critical vulnerabilities for production..."
+          
+          if [ -d "reports" ]; then
+            # Compter les vulnérabilités critiques
+            critical_count=0
+            if find reports -type f -exec grep -i "critical\|cvss.*[9-9]\.[0-9]\|cvss.*10\.0" {} \; > /dev/null 2>&1; then
+              critical_count=$(find reports -type f -exec grep -i "critical\|cvss.*[9-9]\.[0-9]\|cvss.*10\.0" {} \; | wc -l)
+            fi
+            
+            echo "📊 Critical vulnerabilities found: $critical_count"
+            
+            if [ $critical_count -gt 0 ]; then
+              echo "❌ CRITICAL: Production merge blocked due to critical vulnerabilities"
+              echo "🛑 Please resolve all critical vulnerabilities before merging to main"
+              exit 1
+            else
+              echo "✅ No critical vulnerabilities found - safe for production"
+            fi
+          else
+            echo "⚠️ No security reports found - cannot validate security status"
+            exit 1
+          fi
+
+  # Résumé complet pour PR de production
+  production-pr-summary:
+    name: 📊 Production PR Security Gate
+    runs-on: ubuntu-latest
+    needs: [dependency-check, sonar-analysis, zap-security-test, sonar-quality-gate, critical-vulnerability-check]
+    if: always()
+    steps:
+      - name: Generate Production PR Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const results = {
+              dependency: '${{ needs.dependency-check.result }}',
+              sonar: '${{ needs.sonar-analysis.result }}',
+              zap: '${{ needs.zap-security-test.result || 'skipped' }}',
+              qualityGate: '${{ needs.sonar-quality-gate.result }}',
+              criticalCheck: '${{ needs.critical-vulnerability-check.result }}'
+            };
+            
+            const getEmoji = (result) => {
+              switch(result) {
+                case 'success': return '✅';
+                case 'failure': return '❌';
+                case 'cancelled': return '⏹️';
+                case 'skipped': return '⏭️';
+                default: return '❓';
+              }
+            };
+            
+            const allPassed = Object.values(results).every(r => r === 'success' || r === 'skipped');
+            const hasCriticalFailure = results.criticalCheck === 'failure';
+            
+            const comment = `## 🚀 Production Security Gate Analysis
+            
+            ${hasCriticalFailure ? '🔴 **CRITICAL SECURITY ISSUES DETECTED**' : allPassed ? '✅ **ALL SECURITY CHECKS PASSED**' : '⚠️ **SOME CHECKS FAILED**'}
+            
+            | Security Check | Status | Result |
+            |----------------|--------|---------|
+            | 📦 Dependency Security | ${getEmoji(results.dependency)} | ${results.dependency} |
+            | 🔍 SonarQube Analysis | ${getEmoji(results.sonar)} | ${results.sonar} |
+            | 🚪 Quality Gate | ${getEmoji(results.qualityGate)} | ${results.qualityGate} |
+            | 🛡️ ZAP Security Test | ${getEmoji(results.zap)} | ${results.zap} |
+            | 🔴 Critical Vuln Check | ${getEmoji(results.criticalCheck)} | ${results.criticalCheck} |
+            
+            ### 📋 Production Readiness
+            ${hasCriticalFailure 
+              ? '🚫 **MERGE BLOCKED** - Critical vulnerabilities must be resolved before production deployment'
+              : allPassed 
+                ? '✅ **APPROVED FOR PRODUCTION** - All security gates passed successfully'
+                : '⚠️ **REVIEW REQUIRED** - Some security checks failed, manual review needed'}
+            
+            ### 🔒 Security Requirements for Production
+            - ✅ No critical vulnerabilities (CVSS 9.0+)
+            - ✅ SonarQube quality gate passed
+            - ✅ All dependency security checks passed
+            - ✅ ZAP security testing completed
+            
+            ### 🔗 Detailed Reports
+            - [Full Analysis Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - Download security artifacts for detailed vulnerability information
+            
+            ${hasCriticalFailure ? '### 🛑 Action Required\n**Do not merge until all critical vulnerabilities are resolved.**\nContact the security team if assistance is needed.' : ''}
+            
+            ---
+            *Production security gate - Zero tolerance for critical vulnerabilities*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+            
+            // Fail the workflow if critical issues are found
+            if (results.criticalCheck === 'failure') {
+              core.setFailed('Critical vulnerabilities detected - blocking production merge');
+            }

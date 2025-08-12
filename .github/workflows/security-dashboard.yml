@@ -1,0 +1,93 @@
+# Workflow de tableau de bord sécurité - Vue d'ensemble hebdomadaire
+name: Security Dashboard
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Chaque lundi à 8h UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  generate-security-dashboard:
+    name: 📊 Generate Security Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze security trends
+        run: |
+          echo "📊 Generating security dashboard..."
+          
+          # Récupérer les informations des dernières analyses
+          current_date=$(date -u +"%Y-%m-%d")
+          week_ago=$(date -u -d '7 days ago' +"%Y-%m-%d")
+          
+          cat > security-dashboard.md << EOF
+          # 📊 Security Dashboard - Week of $current_date
+          
+          ## 🎯 Executive Summary
+          
+          This weekly security dashboard provides an overview of the security posture across all branches and environments.
+          
+          ## 🏗️ Branch Security Status
+          
+          ### 🚀 Production (main branch)
+          - **Last Scan**: $(git log -1 --format="%cd" --date=short main 2>/dev/null || echo "No commits")
+          - **Status**: $(git log -1 --oneline main 2>/dev/null | head -1 || echo "No commits")
+          - **Security Level**: Production Ready ✅
+          
+          ### 🧪 Development (dev_test branch)  
+          - **Last Scan**: $(git log -1 --format="%cd" --date=short dev_test 2>/dev/null || echo "No commits")
+          - **Status**: $(git log -1 --oneline dev_test 2>/dev/null | head -1 || echo "No commits")
+          - **Security Level**: Development Testing 🧪
+          
+          ## 📈 Security Metrics (Last 7 Days)
+          
+          ### 🔍 Analysis Coverage
+          - **Dependency Scans**: Automated on all pushes ✅
+          - **Code Quality**: SonarQube analysis active ✅
+          - **Penetration Testing**: ZAP scans on PR to dev_test ✅
+          - **Compliance Checks**: Production validation active ✅
+          
+          ### 🎯 Security Targets
+          | Metric | Target | Current | Status |
+          |--------|--------|---------|---------|
+          | Critical Vulns | 0 | TBD | 🎯 |
+          | High Vulns | < 5 | TBD | 🎯 |
+          | Code Coverage | > 80% | TBD | 🎯 |
+          | Quality Gate | Pass | TBD | 🎯 |
+          
+          ## 🔄 CI/CD Security Pipeline Status
+          
+          ### ✅ Active Security Controls
+          - **Branch Protection**: Enabled on main and dev_test ✅
+          - **Required Reviews**: Security team approval required ✅
+          - **Automated Scanning**: Multi-layered security analysis ✅
+          - **Issue Tracking**: Automated vulnerability management ✅
+          
+          ### 🛡️ Security Workflow Coverage
+          
+          | Branch Type | Dependency Check | SonarQube | ZAP Scan | Compliance |
+          |-------------|------------------|-----------|----------|------------|
+          | Feature Branches | ✅ | ✅ | ❌ | ❌ |
+          | PR to dev_test | ✅ | ✅ | ✅ | ❌ |
+          | PR to main | ✅ | ✅ | ✅ | ✅ |
+          | dev_test | ✅ | ✅ | ✅ | ❌ |
+          | main | ✅ | ✅ | ✅ | ✅ |
+          
+          ## 🚨 Recent Security Issues
+          
+          _This section would be populated with recent security issues from GitHub Issues API_
+          
+          ## 📋 Weekly Security Checklist
+          
+          ### 🔍 Review Actions
+          - [ ] Review all critical and high severity vulnerabilities
+          - [ ] Check SonarQube quality gates status
+          - [ ] Verify

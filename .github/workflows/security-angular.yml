@@ -1,0 +1,24 @@
+name: Angular Security Pipeline
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: 
+      - dev_test
+      - main
+    types: [opened, synchronize, reopened]
+
+jobs:
+  angular-security:
+    name: 🅰️ Angular Security Analysis
+    uses: Tower-IS/global-workflows/.github/workflows/security-checks.yml@main
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    with:
+      # Configuration spécifique Angular
+      force_full_scan: false
+      cvss_threshold: "7.0"
+      skip_zap_scan: false  # ZAP scan activé pour Angular
