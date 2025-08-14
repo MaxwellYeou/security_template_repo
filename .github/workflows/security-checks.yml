@@ -225,11 +225,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [detect-context, feature-branch-checks, pr-to-dev-checks, pr-to-main-checks, dev-test-checks, main-branch-checks]
     if: always() && (needs.feature-branch-checks.result == 'success' || needs.pr-to-dev-checks.result == 'success' || needs.pr-to-main-checks.result == 'success' || needs.dev-test-checks.result == 'success' || needs.main-branch-checks.result == 'success')
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
+
       - name: Download security reports
         uses: actions/download-artifact@v4
         with:
@@ -238,256 +238,44 @@ jobs:
           path: reports
         continue-on-error: true
 
-      - name: Find existing security issues
-        id: find-issues
-        run: |
-          echo "🔍 Recherche d'issues de sécurité existantes..."
-          
-          # Chercher les issues ouvertes avec les labels de sécurité
-          existing_issues=$(gh issue list --state open --label "security,automated" --json number,title,body --limit 100)
-          echo "existing_issues<<EOF" >> $GITHUB_OUTPUT
-          echo "$existing_issues" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          
-          # Extraire les numéros d'issues par branche/contexte
-          sonar_issue=$(echo "$existing_issues" | jq -r '.[] | select(.title | contains("SonarQube Security")) | .number')
-          zap_issue=$(echo "$existing_issues" | jq -r '.[] | select(.title | contains("OWASP ZAP Security")) | .number')
-          dependency_issue=$(echo "$existing_issues" | jq -r '.[] | select(.title | contains("Dependency Security")) | .number')
-          
-          echo "sonar_issue_number=${sonar_issue:-}" >> $GITHUB_OUTPUT
-          echo "zap_issue_number=${zap_issue:-}" >> $GITHUB_OUTPUT
-          echo "dependency_issue_number=${dependency_issue:-}" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
       - name: Check for critical findings
         id: check-findings
         run: |
           critical=false
-          findings_summary=""
-          sonar_findings=""
-          zap_findings=""
-          dependency_findings=""
-          
+          summary=""
+
           if [ -d "reports" ]; then
             echo "🔍 Analysing security reports..."
-            
-            # Analyse des rapports SonarQube
-            if [ -f "reports/sonar-report.json" ]; then
-              sonar_critical=$(jq -r '.issues[] | select(.severity == "BLOCKER" or .severity == "CRITICAL") | "\(.rule): \(.message)"' reports/sonar-report.json 2>/dev/null || echo "")
-              if [ -n "$sonar_critical" ]; then
-                sonar_findings="$sonar_critical"
-                critical=true
-              fi
-            fi
-            
-            # Analyse des rapports OWASP ZAP
-            if [ -f "reports/zap-report.xml" ]; then
-              zap_critical=$(xmllint --xpath "//alertitem[riskdesc[starts-with(text(),'High') or starts-with(text(),'Critical')]]/name/text()" reports/zap-report.xml 2>/dev/null || echo "")
-              if [ -n "$zap_critical" ]; then
-                zap_findings="$zap_critical"
-                critical=true
-              fi
-            fi
-            
-            # Analyse des dépendances
-            if [ -f "reports/audit-report.json" ]; then
-              dependency_critical=$(jq -r '.vulnerabilities[] | select(.severity == "critical" or .severity == "high") | "\(.title): \(.module_name)"' reports/audit-report.json 2>/dev/null || echo "")
-              if [ -n "$dependency_critical" ]; then
-                dependency_findings="$dependency_critical"
-                critical=true
-              fi
+            critical_count=$(find reports -type f -exec grep -i "critical" {} \; | wc -l || echo 0)
+            if [ "$critical_count" -gt 0 ]; then
+              critical=true
+              summary="⚠️ $critical_count critical vulnerabilities found on branch '${{ github.ref_name }}'."
+              echo "Security issues detected."
             fi
           fi
-          
-          echo "critical_found=$critical" >> $GITHUB_OUTPUT
-          echo "sonar_findings<<EOF" >> $GITHUB_OUTPUT
-          echo "$sonar_findings" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "zap_findings<<EOF" >> $GITHUB_OUTPUT
-          echo "$zap_findings" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "dependency_findings<<EOF" >> $GITHUB_OUTPUT
-          echo "$dependency_findings" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Close resolved security issues
-        if: steps.check-findings.outputs.critical_found == 'false'
-        run: |
-          echo "🎉 Aucune vulnérabilité critique trouvée - fermeture des issues existantes"
-          
-          # Fermer les issues SonarQube résolues
-          if [ -n "${{ steps.find-issues.outputs.sonar_issue_number }}" ] && [ -z "${{ steps.check-findings.outputs.sonar_findings }}" ]; then
-            gh issue close ${{ steps.find-issues.outputs.sonar_issue_number }} --comment "✅ Vulnérabilités SonarQube résolues dans le commit ${{ github.sha }}"
-          fi
-          
-          # Fermer les issues ZAP résolues
-          if [ -n "${{ steps.find-issues.outputs.zap_issue_number }}" ] && [ -z "${{ steps.check-findings.outputs.zap_findings }}" ]; then
-            gh issue close ${{ steps.find-issues.outputs.zap_issue_number }} --comment "✅ Vulnérabilités OWASP ZAP résolues dans le commit ${{ github.sha }}"
-          fi
-          
-          # Fermer les issues de dépendances résolues
-          if [ -n "${{ steps.find-issues.outputs.dependency_issue_number }}" ] && [ -z "${{ steps.check-findings.outputs.dependency_findings }}" ]; then
-            gh issue close ${{ steps.find-issues.outputs.dependency_issue_number }} --comment "✅ Vulnérabilités de dépendances résolues dans le commit ${{ github.sha }}"
-          fi
+          echo "critical=$critical" >> $GITHUB_OUTPUT
+          echo "summary=$summary" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Security Issue (if not already open)
+        if: steps.check-findings.outputs.critical == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create or update SonarQube security issue
-        if: steps.check-findings.outputs.sonar_findings != ''
         run: |
-          BRANCH="${{ github.ref_name }}"
-          COMMIT="${{ github.sha }}"
-          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          ISSUE_BODY="## 🔍 Vulnérabilités SonarQube détectées
+          title="🔐 Security Alert - ${{ github.ref_name }}"
+          body="${{ steps.check-findings.outputs.summary }}%0A%0APlease review the detailed reports in the 'reports' folder of this workflow run."
 
-          **Branche:** \`$BRANCH\`  
-          **Commit:** \`$COMMIT\`  
-          **Analyse:** $DATE  
-          **Workflow:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          echo "🔍 Checking for existing issue..."
+          issue_number=$(gh issue list --state open --search "$title" --json number,title --jq '.[] | select(.title=="'"$title"'") | .number')
 
-          ### 🚨 Vulnérabilités trouvées:
-          \`\`\`
-          ${{ steps.check-findings.outputs.sonar_findings }}
-          \`\`\`
-
-          ### 📋 Actions requises:
-          - [ ] Analyser les vulnérabilités listées ci-dessus
-          - [ ] Corriger le code source selon les recommandations SonarQube
-          - [ ] Vérifier que les corrections n'introduisent pas de régressions
-          - [ ] Relancer l'analyse de sécurité
-
-          ---
-          *Issue mise à jour automatiquement par le pipeline de sécurité*"
-          
-          if [ -n "${{ steps.find-issues.outputs.sonar_issue_number }}" ]; then
-            echo "📝 Mise à jour de l'issue SonarQube existante #${{ steps.find-issues.outputs.sonar_issue_number }}"
-            gh issue edit ${{ steps.find-issues.outputs.sonar_issue_number }} --body "$ISSUE_BODY"
-            gh issue comment ${{ steps.find-issues.outputs.sonar_issue_number }} --body "🔄 Issue mise à jour avec les dernières vulnérabilités détectées dans le commit $COMMIT"
-          else
-            echo "🆕 Création d'une nouvelle issue SonarQube"
-            gh issue create \
-              --title "🔍 SonarQube Security Alert - $BRANCH" \
-              --body "$ISSUE_BODY" \
-              --label "security,automated,sonarqube,critical" \
-              --assignee "${{ github.actor }}"
+          if [ -n "$issue_number" ]; then
+            echo "⚠️ An open issue with this title already exists (#$issue_number). Skipping creation."
+            exit 0
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create or update OWASP ZAP security issue
-        if: steps.check-findings.outputs.zap_findings != ''
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          COMMIT="${{ github.sha }}"
-          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          ISSUE_BODY="## 🛡️ Vulnérabilités OWASP ZAP détectées
-
-          **Branche:** \`$BRANCH\`  
-          **Commit:** \`$COMMIT\`  
-          **Analyse:** $DATE  
-          **Workflow:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          ### 🚨 Vulnérabilités trouvées:
-          \`\`\`
-          ${{ steps.check-findings.outputs.zap_findings }}
-          \`\`\`
-
-          ### 📋 Actions requises:
-          - [ ] Analyser les vulnérabilités de sécurité web détectées
-          - [ ] Corriger les failles de sécurité dans l'application
-          - [ ] Tester les corrections en local
-          - [ ] Relancer l'analyse OWASP ZAP
-
-          ---
-          *Issue mise à jour automatiquement par le pipeline de sécurité*"
-          
-          if [ -n "${{ steps.find-issues.outputs.zap_issue_number }}" ]; then
-            echo "📝 Mise à jour de l'issue OWASP ZAP existante #${{ steps.find-issues.outputs.zap_issue_number }}"
-            gh issue edit ${{ steps.find-issues.outputs.zap_issue_number }} --body "$ISSUE_BODY"
-            gh issue comment ${{ steps.find-issues.outputs.zap_issue_number }} --body "🔄 Issue mise à jour avec les dernières vulnérabilités détectées dans le commit $COMMIT"
-          else
-            echo "🆕 Création d'une nouvelle issue OWASP ZAP"
-            gh issue create \
-              --title "🛡️ OWASP ZAP Security Alert - $BRANCH" \
-              --body "$ISSUE_BODY" \
-              --label "security,automated,owasp-zap,critical" \
-              --assignee "${{ github.actor }}"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create or update Dependency security issue
-        if: steps.check-findings.outputs.dependency_findings != ''
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          COMMIT="${{ github.sha }}"
-          DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          ISSUE_BODY="## 📦 Vulnérabilités de dépendances détectées
-
-          **Branche:** \`$BRANCH\`  
-          **Commit:** \`$COMMIT\`  
-          **Analyse:** $DATE  
-          **Workflow:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-          ### 🚨 Dépendances vulnérables:
-          \`\`\`
-          ${{ steps.check-findings.outputs.dependency_findings }}
-          \`\`\`
-
-          ### 📋 Actions requises:
-          - [ ] Mettre à jour les dépendances vulnérables vers des versions sécurisées
-          - [ ] Vérifier la compatibilité après mise à jour
-          - [ ] Tester l'application avec les nouvelles versions
-          - [ ] Relancer l'audit de sécurité des dépendances
-
-          ---
-          *Issue mise à jour automatiquement par le pipeline de sécurité*"
-          
-          if [ -n "${{ steps.find-issues.outputs.dependency_issue_number }}" ]; then
-            echo "📝 Mise à jour de l'issue de dépendances existante #${{ steps.find-issues.outputs.dependency_issue_number }}"
-            gh issue edit ${{ steps.find-issues.outputs.dependency_issue_number }} --body "$ISSUE_BODY"
-            gh issue comment ${{ steps.find-issues.outputs.dependency_issue_number }} --body "🔄 Issue mise à jour avec les dernières vulnérabilités détectées dans le commit $COMMIT"
-          else
-            echo "🆕 Création d'une nouvelle issue de dépendances"
-            gh issue create \
-              --title "📦 Dependency Security Alert - $BRANCH" \
-              --body "$ISSUE_BODY" \
-              --label "security,automated,dependencies,critical" \
-              --assignee "${{ github.actor }}"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "## 📊 Résumé de l'analyse de sécurité" >> $GITHUB_STEP_SUMMARY
-          echo "**Branche analysée:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ steps.check-findings.outputs.critical_found }}" == "true" ]; then
-            echo "🚨 **Des vulnérabilités critiques ont été détectées !**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            
-            if [ -n "${{ steps.check-findings.outputs.sonar_findings }}" ]; then
-              echo "- 🔍 Vulnérabilités SonarQube détectées" >> $GITHUB_STEP_SUMMARY
-            fi
-            if [ -n "${{ steps.check-findings.outputs.zap_findings }}" ]; then
-              echo "- 🛡️ Vulnérabilités OWASP ZAP détectées" >> $GITHUB_STEP_SUMMARY
-            fi
-            if [ -n "${{ steps.check-findings.outputs.dependency_findings }}" ]; then
-              echo "- 📦 Vulnérabilités de dépendances détectées" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Les issues GitHub ont été créées ou mises à jour avec les détails des vulnérabilités." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ **Aucune vulnérabilité critique détectée**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Les issues de sécurité existantes ont été fermées si elles étaient résolues." >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "🆕 No existing issue found — creating new one..."
+          gh issue create \
+            --title "$title" \
+            --body "$body" \
+            --label "security,automated" \
+            --assignee "${{ github.actor }}"
