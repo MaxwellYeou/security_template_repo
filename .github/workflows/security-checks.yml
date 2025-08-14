@@ -218,7 +218,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
- ================ SECURITY ISSUE CREATION ===================
+ #================ SECURITY ISSUE CREATION ===================
   # Création/Mise à jour d'issues en cas de vulnérabilités critiques
   create-security-issues:
     name: 🛑 Security Issue Management
